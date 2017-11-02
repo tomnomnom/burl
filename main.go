@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -30,32 +31,50 @@ func main() {
 
 	sc := bufio.NewScanner(input)
 
-	for sc.Scan() {
-		url, err := url.ParseRequestURI(sc.Text())
-		if err != nil {
-			fmt.Printf("invalid url: %s\n", sc.Text())
-			continue
-		}
+	urls := make(chan string, 128)
+	concurrency := 12
+	var wg sync.WaitGroup
+	wg.Add(concurrency)
 
-		if !resolves(url) {
-			fmt.Printf("does not resolve: %s\n", url)
-			continue
-		}
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			for raw := range urls {
 
-		resp, err := fetchURL(url)
-		if err != nil {
-			fmt.Printf("failed to fetch: %s (%s)\n", url, err)
-			continue
-		}
+				u, err := url.ParseRequestURI(raw)
+				if err != nil {
+					fmt.Printf("invalid url: %s\n", raw)
+					continue
+				}
 
-		if resp.StatusCode != http.StatusOK {
-			fmt.Printf("non-200 response code: %s (%s)\n", url, resp.Status)
-		}
+				if !resolves(u) {
+					fmt.Printf("does not resolve: %s\n", u)
+					continue
+				}
+
+				resp, err := fetchURL(u)
+				if err != nil {
+					fmt.Printf("failed to fetch: %s (%s)\n", u, err)
+					continue
+				}
+
+				if resp.StatusCode != http.StatusOK {
+					fmt.Printf("non-200 response code: %s (%s)\n", u, resp.Status)
+				}
+			}
+			wg.Done()
+		}()
 	}
+
+	for sc.Scan() {
+		urls <- sc.Text()
+	}
+	close(urls)
 
 	if sc.Err() != nil {
 		fmt.Printf("error: %s\n", sc.Err())
 	}
+
+	wg.Wait()
 }
 
 func resolves(u *url.URL) bool {
@@ -69,16 +88,20 @@ func fetchURL(u *url.URL) (*http.Response, error) {
 	}
 	client := http.Client{
 		Transport: tr,
-		Timeout:   20 * time.Second,
+		Timeout:   5 * time.Second,
 	}
 
 	req, err := http.NewRequest("GET", u.String(), nil)
 	if err != nil {
 		return nil, err
 	}
+	req.Close = true
 	req.Header.Set("User-Agent", "burl/0.1")
 
 	resp, err := client.Do(req)
+	if resp != nil {
+		resp.Body.Close()
+	}
 
 	if err != nil {
 		return nil, err
